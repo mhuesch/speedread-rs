@@ -1,0 +1,13 @@
+graph fsm_diagram {
+  rankdir="LR";
+
+  paused;
+  running;
+
+  edge [minlen = 3];
+
+  paused -- running [label="toggle", arrowhead="tee"];
+  running -- paused [label="toggle", arrowhead="vee"];
+  running -- running [label="next", arrowhead="vee"];
+  paused -- paused [label="next", arrowhead="vee"];
+}

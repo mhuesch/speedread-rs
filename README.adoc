@@ -1,0 +1,3 @@
+= speedread-rs
+
+a Rust clone of https://github.com/pasky/speedread[speedread], built with https://github.com/fdehau/tui-rs/[tui-rs].
