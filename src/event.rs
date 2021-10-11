@@ -1,7 +1,6 @@
 use std::sync::mpsc;
 use std::thread;
 
-use termion;
 use termion::event::Key;
 use termion::input::TermRead;
 
@@ -18,19 +17,16 @@ impl Events {
     pub fn new() -> Events {
         let (tx, rx) = mpsc::channel();
         let input_handle = {
-            let tx = tx.clone();
             thread::spawn(move || match termion::get_tty() {
                 Ok(input) => {
-                    for evt in input.keys() {
-                        if let Ok(key) = evt {
-                            if let Err(err) = tx.send(Event::Input(key)) {
-                                eprintln!("{}", err);
-                                return;
-                            }
+                    for key in input.keys().filter_map(|evt| evt.ok()) {
+                        if let Err(err) = tx.send(Event::Input(key)) {
+                            eprintln!("{}", err);
+                            return;
                         }
                     }
                 }
-                Err(msg) => panic!(msg),
+                Err(msg) => panic!("{}", msg),
             })
         };
         Events { rx, input_handle }

@@ -15,7 +15,7 @@ use tui::{
 };
 
 #[allow(dead_code)]
-const HELP: &'static str = r#"
+const HELP: &str = r#"
 ########################################################################
 #                              __                    __                #
 #    _________  ___  ___  ____/ /_______  ____ _____/ /     __________ #
@@ -58,7 +58,7 @@ impl App {
     fn new(init_wpm: usize, text: Vec<String>, resume: usize) -> App {
         let (timer_send, timer_recv) = mpsc::channel();
         App {
-            text: text,
+            text,
             word_idx: resume,
             paused: false,
             wpm: init_wpm,
@@ -79,7 +79,7 @@ impl App {
         let end = cmp::min(self.word_idx + n + 1, self.text.len() - 1);
         let slice = &self.text[self.word_idx..end];
         let mut vec = slice.to_vec();
-        if vec.len() > 0 {
+        if !vec.is_empty() {
             vec.remove(0);
         }
         vec
@@ -125,7 +125,7 @@ impl App {
         let sender = self.timer_send.clone();
         thread::spawn(move || {
             thread::sleep(dur);
-            sender.send(TimerEvent::Next);
+            sender.send(TimerEvent::Next).expect("send failed");
         });
     }
 }
