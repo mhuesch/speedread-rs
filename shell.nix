@@ -1,13 +1,3 @@
-let
-  sources = import ./nix/sources.nix;
-  rust = import ./nix/rust.nix { inherit sources; };
-in
+{ system ? builtins.currentSystem }:
 
-{ pkgs ? import sources.nixpkgs {}
-}:
-
-pkgs.mkShell {
-  buildInputs = with pkgs; [
-    rust
-  ];
-}
+(builtins.getFlake (toString ./.)).devShell.${system}

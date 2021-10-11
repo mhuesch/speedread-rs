@@ -1,3 +1,19 @@
 = speedread-rs
 
 a Rust clone of https://github.com/pasky/speedread[speedread], built with https://github.com/fdehau/tui-rs/[tui-rs].
+
+== dev shell
+
+commands below expect to be run inside of a nix dev shell.
+
+either run `nix develop` (requires https://nixos.wiki/wiki/Flakes[Flakes]), run `nix-shell` (using legacy nix), or use https://github.com/nix-community/nix-direnv[nix-direnv].
+
+== Keeping `Cargo.nix` (cargo2nix) up to date
+
+please do this after modifying source, so that dependencies are updated.
+
+[source]
+----
+# in repo root
+cargo2nix -f
+----
