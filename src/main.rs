@@ -39,10 +39,13 @@ const HELP: &str = r#"
 struct App {
     text: Vec<String>,
     word_idx: usize,
-    paused: bool,
+    /// `None` signifies a paused state. at `Some(0)`, we advance to the next
+    /// word. at `Some(n+1)` we advance to `Some(n)`.
+    ticks_on_current_word: Option<u64>,
     wpm: u64,
-    timer_send: mpsc::Sender<TimerEvent>,
     timer_recv: mpsc::Receiver<TimerEvent>,
+    #[allow(dead_code)]
+    timer_handle: thread::JoinHandle<()>,
 }
 
 enum SpeedChange {
@@ -51,19 +54,25 @@ enum SpeedChange {
 }
 
 enum TimerEvent {
-    Next,
+    Tick,
 }
+
+const TICK_DURATION: u64 = 5;
 
 impl App {
     fn new(init_wpm: u64, text: Vec<String>, resume: usize) -> App {
         let (timer_send, timer_recv) = mpsc::channel();
+        let timer_handle = thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(TICK_DURATION));
+            timer_send.send(TimerEvent::Tick).expect("send failed");
+        });
         App {
             text,
             word_idx: resume,
-            paused: false,
+            ticks_on_current_word: Some(ticks_per_word(init_wpm)),
             wpm: init_wpm,
-            timer_send,
             timer_recv,
+            timer_handle,
         }
     }
 
@@ -97,18 +106,28 @@ impl App {
         self.word_idx = cmp::min(self.word_idx + 1, self.text.len() - 1);
     }
 
-    fn wpm_to_millis_per_word(&mut self) -> u64 {
-        //  60s  * 1000 ms *  1 min
-        // -----   -------   --------
-        // 1 min     1 s      x words
-        60 * 1000 / self.wpm
+    fn ticks_per_word(&self) -> u64 {
+        ticks_per_word(self.wpm)
     }
 
     fn toggle(&mut self) {
-        self.paused = !self.paused;
-        if !self.paused {
-            self.spawn_timer();
-        }
+        let new_ticks = match self.ticks_on_current_word {
+            Some(_) => None,
+            None => Some(self.ticks_per_word()),
+        };
+        self.ticks_on_current_word = new_ticks;
+    }
+
+    fn tick(&mut self) {
+        let new_ticks = match self.ticks_on_current_word {
+            Some(0) => {
+                self.advance_a_word();
+                Some(self.ticks_per_word())
+            }
+            Some(n) => Some(n - 1),
+            None => None,
+        };
+        self.ticks_on_current_word = new_ticks;
     }
 
     fn speed_change(&mut self, v: SpeedChange) {
@@ -118,15 +137,16 @@ impl App {
         };
     }
 
-    fn spawn_timer(&mut self) {
-        let mpw = self.wpm_to_millis_per_word();
-        let dur = Duration::from_millis(mpw);
-        let sender = self.timer_send.clone();
-        thread::spawn(move || {
-            thread::sleep(dur);
-            sender.send(TimerEvent::Next).expect("send failed");
-        });
+    fn paused(&self) -> bool {
+        self.ticks_on_current_word.is_none()
     }
+}
+
+fn ticks_per_word(wpm: u64) -> u64 {
+    //  60s  * 1000 ms *  1 min   *  1 tick
+    // -----   -------   --------   --------
+    // 1 min     1 s      x words   n millis
+    60 * 1000 / wpm / TICK_DURATION
 }
 
 #[derive(StructOpt, Debug)]
@@ -177,7 +197,6 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
     let events = Events::new();
 
     let mut app = App::new(args.wpm, text, args.resume);
-    app.spawn_timer();
 
     loop {
         terminal.draw(|f| {
@@ -244,7 +263,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             //---------------//
             // upper widget //
             //-------------//
-            let line = vec![Spans::from(vec![if app.paused {
+            let line = vec![Spans::from(vec![if app.paused() {
                 Span::raw(app.preceding_n_words(args.preceding_word_count).join(" "))
             } else {
                 Span::raw("")
@@ -258,7 +277,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             //---------------//
             // lower widget //
             //-------------//
-            let line = vec![Spans::from(vec![if app.paused {
+            let line = vec![Spans::from(vec![if app.paused() {
                 Span::raw(app.succeeding_n_words(args.succeeding_word_count).join(" "))
             } else {
                 Span::raw("")
@@ -280,9 +299,9 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
                     app.speed_change(SpeedChange::Slower);
                 } else if input == Key::Char(']') {
                     app.speed_change(SpeedChange::Faster);
-                } else if input == Key::Left && app.paused {
+                } else if input == Key::Left && app.paused() {
                     app.retreat_a_word();
-                } else if input == Key::Right && app.paused {
+                } else if input == Key::Right && app.paused() {
                     app.advance_a_word();
                 }
             }
@@ -294,11 +313,8 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
         }
 
         match app.timer_recv.try_recv() {
-            Ok(TimerEvent::Next) => {
-                if !app.paused {
-                    app.advance_a_word();
-                    app.spawn_timer();
-                }
+            Ok(TimerEvent::Tick) => {
+                app.tick();
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
