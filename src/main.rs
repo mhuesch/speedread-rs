@@ -2,7 +2,7 @@
 mod event;
 
 use crate::event::{Event, Events};
-use std::{cmp, convert::TryFrom, error::Error, io, io::Read, sync::mpsc, thread, time::Duration};
+use std::{cmp, error::Error, io, io::Read, sync::mpsc, thread, time::Duration};
 use structopt::StructOpt;
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::{
@@ -40,7 +40,7 @@ struct App {
     text: Vec<String>,
     word_idx: usize,
     paused: bool,
-    wpm: usize,
+    wpm: u64,
     timer_send: mpsc::Sender<TimerEvent>,
     timer_recv: mpsc::Receiver<TimerEvent>,
 }
@@ -55,7 +55,7 @@ enum TimerEvent {
 }
 
 impl App {
-    fn new(init_wpm: usize, text: Vec<String>, resume: usize) -> App {
+    fn new(init_wpm: u64, text: Vec<String>, resume: usize) -> App {
         let (timer_send, timer_recv) = mpsc::channel();
         App {
             text,
@@ -101,8 +101,7 @@ impl App {
         //  60s  * 1000 ms *  1 min
         // -----   -------   --------
         // 1 min     1 s      x words
-        let wpm: u64 = TryFrom::try_from(self.wpm).expect("self.wpm failed u64 conversion");
-        60 * 1000 / wpm
+        60 * 1000 / self.wpm
     }
 
     fn toggle(&mut self) {
@@ -135,7 +134,7 @@ impl App {
 struct Cli {
     /// Desired initial reading speed (words per minute)
     #[structopt(long, short, default_value = "300")]
-    wpm: usize,
+    wpm: u64,
 
     /// Desired index of initial word in text
     #[structopt(long, short, default_value = "0")]
