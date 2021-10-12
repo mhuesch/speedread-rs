@@ -182,7 +182,7 @@ fn find_orp(len: usize) -> usize {
     }
 }
 
-fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
+fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
     let mut buffer = String::new();
     std::io::stdin().lock().read_to_string(&mut buffer)?;
     let text = buffer.split_whitespace().map(|x| x.to_string()).collect();
@@ -323,7 +323,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             }
         }
     }
-    Ok(app.word_idx)
+    Ok((app.word_idx, app.wpm))
 }
 
 fn main() {
@@ -331,10 +331,11 @@ fn main() {
 
     match go(args) {
         Err(msg) => println!("err: {}", msg),
-        Ok(final_idx) => {
+        Ok((final_idx, final_wpm)) => {
             println!(
-                "To resume from this point run with argument `-r {}`",
-                final_idx
+                "to resume from this point, run with flag `-r {}`. \n\
+                 to resume with this speed, run with flag `-w {}`.",
+                final_idx, final_wpm
             );
         }
     }
