@@ -115,7 +115,7 @@ impl App {
         vec
     }
 
-    fn current_word(&mut self) -> String {
+    fn current_word(&self) -> String {
         self.text[self.word_idx].clone()
     }
 
@@ -127,11 +127,26 @@ impl App {
         self.word_idx = cmp::min(self.word_idx + 1, self.text.len() - 1);
     }
 
-    fn send_current_duration(&self) {
+    fn send_current_duration(&self, is_starting: bool) {
         match &self.opt_ticker {
             None => {}
             Some((_, tick_dur_send)) => {
-                let dur = Duration::from_millis(self.standard_tick_millis());
+                let w = self.current_word();
+                let mut multiplier = 1.;
+
+                if w.ends_with(|c| ".!?".contains(c)) {
+                    multiplier *= 2.;
+                } else if w.ends_with(|c| ",:;".contains(c)) {
+                    multiplier *= 1.5;
+                }
+
+                if is_starting {
+                    multiplier *= 5.;
+                }
+
+                let dur = Duration::from_millis(
+                    ((self.standard_tick_millis() as f64) * multiplier).round() as u64,
+                );
                 tick_dur_send.send(dur).unwrap();
             }
         }
@@ -156,7 +171,7 @@ impl App {
             }
         };
         self.opt_ticker = new_opt_ticker;
-        self.send_current_duration();
+        self.send_current_duration(true);
     }
 
     fn speed_change(&mut self, v: SpeedChange) {
@@ -219,7 +234,7 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
     let events = Events::new();
 
     let mut app = App::new(args.wpm, text, args.resume);
-    app.send_current_duration();
+    app.send_current_duration(true);
 
     loop {
         terminal.draw(|f| {
@@ -339,7 +354,7 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
             Ok(Tick) => {
                 if !app.paused() {
                     app.advance_a_word();
-                    app.send_current_duration();
+                    app.send_current_duration(false);
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {}
