@@ -2,7 +2,7 @@
 mod event;
 
 use crate::event::{Event, Events};
-use std::{cmp, convert::TryFrom, error::Error, io, io::Read, sync::mpsc, thread, time::Duration};
+use std::{cmp, error::Error, io, io::Read, sync::{mpsc, mpsc::{Receiver, Sender}}, thread, time::Duration};
 use structopt::StructOpt;
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::{
@@ -39,10 +39,12 @@ const HELP: &str = r#"
 struct App {
     text: Vec<String>,
     word_idx: usize,
-    paused: bool,
-    wpm: usize,
-    timer_send: mpsc::Sender<TimerEvent>,
-    timer_recv: mpsc::Receiver<TimerEvent>,
+    /// `None` signifies a paused state. `Some` indicates we are reading,
+    /// and the `JoinHandle` refers to our `Tick` thread.
+    opt_ticker: Option<(thread::JoinHandle<()>, Sender<Duration>)>,
+    wpm: u64,
+    tick_send: Sender<Tick>,
+    tick_recv: Receiver<Tick>,
 }
 
 enum SpeedChange {
@@ -50,20 +52,34 @@ enum SpeedChange {
     Faster,
 }
 
-enum TimerEvent {
-    Next,
+struct Tick;
+
+fn mk_ticker_handle(tick_dur_recv: Receiver<Duration>, tick_send: Sender<Tick>) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        match tick_dur_recv.recv() {
+            Ok(dur) => {
+                thread::sleep(dur);
+                tick_send.send(Tick).unwrap();
+            }
+            Err(_err) => {
+                break;
+            }
+        }
+    })
 }
 
 impl App {
-    fn new(init_wpm: usize, text: Vec<String>, resume: usize) -> App {
-        let (timer_send, timer_recv) = mpsc::channel();
+    fn new(init_wpm: u64, text: Vec<String>, resume: usize) -> App {
+        let (tick_send, tick_recv) = mpsc::channel();
+        let (tick_dur_send, tick_dur_recv) = mpsc::channel();
+        let ticker_handle = mk_ticker_handle(tick_dur_recv, tick_send.clone());
         App {
             text,
             word_idx: resume,
-            paused: false,
+            opt_ticker: Some((ticker_handle, tick_dur_send)),
             wpm: init_wpm,
-            timer_send,
-            timer_recv,
+            tick_send,
+            tick_recv,
         }
     }
 
@@ -97,19 +113,33 @@ impl App {
         self.word_idx = cmp::min(self.word_idx + 1, self.text.len() - 1);
     }
 
-    fn wpm_to_millis_per_word(&mut self) -> u64 {
+    fn send_current_duration(&self) {
+        match &self.opt_ticker {
+            None => { }
+            Some((_, tick_dur_send)) => {
+                let dur = Duration::from_millis(self.standard_tick_millis());
+                tick_dur_send.send(dur).unwrap();
+            }
+        }
+    }
+
+    fn standard_tick_millis(&self) -> u64 {
         //  60s  * 1000 ms *  1 min
         // -----   -------   --------
         // 1 min     1 s      x words
-        let wpm: u64 = TryFrom::try_from(self.wpm).expect("self.wpm failed u64 conversion");
-        60 * 1000 / wpm
+        60 * 1000 / self.wpm
     }
 
     fn toggle(&mut self) {
-        self.paused = !self.paused;
-        if !self.paused {
-            self.spawn_timer();
-        }
+        let new_opt_ticker = match self.opt_ticker {
+            Some(_) => None,
+            None => {
+                let (tick_dur_send, tick_dur_recv) = mpsc::channel();
+                Some((mk_ticker_handle(tick_dur_recv, self.tick_send.clone()), tick_dur_send))
+            }
+        };
+        self.opt_ticker = new_opt_ticker;
+        self.send_current_duration();
     }
 
     fn speed_change(&mut self, v: SpeedChange) {
@@ -119,14 +149,8 @@ impl App {
         };
     }
 
-    fn spawn_timer(&mut self) {
-        let mpw = self.wpm_to_millis_per_word();
-        let dur = Duration::from_millis(mpw);
-        let sender = self.timer_send.clone();
-        thread::spawn(move || {
-            thread::sleep(dur);
-            sender.send(TimerEvent::Next).expect("send failed");
-        });
+    fn paused(&self) -> bool {
+        self.opt_ticker.is_none()
     }
 }
 
@@ -135,7 +159,7 @@ impl App {
 struct Cli {
     /// Desired initial reading speed (words per minute)
     #[structopt(long, short, default_value = "300")]
-    wpm: usize,
+    wpm: u64,
 
     /// Desired index of initial word in text
     #[structopt(long, short, default_value = "0")]
@@ -163,7 +187,7 @@ fn find_orp(len: usize) -> usize {
     }
 }
 
-fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
+fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
     let mut buffer = String::new();
     std::io::stdin().lock().read_to_string(&mut buffer)?;
     let text = buffer.split_whitespace().map(|x| x.to_string()).collect();
@@ -178,7 +202,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
     let events = Events::new();
 
     let mut app = App::new(args.wpm, text, args.resume);
-    app.spawn_timer();
+    app.send_current_duration();
 
     loop {
         terminal.draw(|f| {
@@ -245,7 +269,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             //---------------//
             // upper widget //
             //-------------//
-            let line = vec![Spans::from(vec![if app.paused {
+            let line = vec![Spans::from(vec![if app.paused() {
                 Span::raw(app.preceding_n_words(args.preceding_word_count).join(" "))
             } else {
                 Span::raw("")
@@ -259,7 +283,7 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             //---------------//
             // lower widget //
             //-------------//
-            let line = vec![Spans::from(vec![if app.paused {
+            let line = vec![Spans::from(vec![if app.paused() {
                 Span::raw(app.succeeding_n_words(args.succeeding_word_count).join(" "))
             } else {
                 Span::raw("")
@@ -281,9 +305,9 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
                     app.speed_change(SpeedChange::Slower);
                 } else if input == Key::Char(']') {
                     app.speed_change(SpeedChange::Faster);
-                } else if input == Key::Left && app.paused {
+                } else if input == Key::Left && app.paused() {
                     app.retreat_a_word();
-                } else if input == Key::Right && app.paused {
+                } else if input == Key::Right && app.paused() {
                     app.advance_a_word();
                 }
             }
@@ -294,21 +318,21 @@ fn go(args: Cli) -> Result<usize, Box<dyn Error>> {
             }
         }
 
-        match app.timer_recv.try_recv() {
-            Ok(TimerEvent::Next) => {
-                if !app.paused {
+        match app.tick_recv.try_recv() {
+            Ok(Tick) => {
+                if !app.paused() {
                     app.advance_a_word();
-                    app.spawn_timer();
+                    app.send_current_duration();
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
-                println!("timer channel disconnected");
+                println!("ticker channel disconnected");
                 break;
             }
         }
     }
-    Ok(app.word_idx)
+    Ok((app.word_idx, app.wpm))
 }
 
 fn main() {
@@ -316,10 +340,11 @@ fn main() {
 
     match go(args) {
         Err(msg) => println!("err: {}", msg),
-        Ok(final_idx) => {
+        Ok((final_idx, final_wpm)) => {
             println!(
-                "To resume from this point run with argument `-r {}`",
-                final_idx
+                "to resume from this point, run with flag `-r {}`. \n\
+                 to resume with this speed, run with flag `-w {}`.",
+                final_idx, final_wpm
             );
         }
     }
