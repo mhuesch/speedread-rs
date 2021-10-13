@@ -2,7 +2,18 @@
 mod event;
 
 use crate::event::{Event, Events};
-use std::{cmp, error::Error, io, io::Read, sync::{mpsc, mpsc::{Receiver, Sender}}, thread, time::Duration};
+use std::{
+    cmp,
+    error::Error,
+    io,
+    io::Read,
+    sync::{
+        mpsc,
+        mpsc::{Receiver, Sender},
+    },
+    thread,
+    time::Duration,
+};
 use structopt::StructOpt;
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::{
@@ -54,7 +65,10 @@ enum SpeedChange {
 
 struct Tick;
 
-fn mk_ticker_handle(tick_dur_recv: Receiver<Duration>, tick_send: Sender<Tick>) -> thread::JoinHandle<()> {
+fn mk_ticker_handle(
+    tick_dur_recv: Receiver<Duration>,
+    tick_send: Sender<Tick>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || loop {
         match tick_dur_recv.recv() {
             Ok(dur) => {
@@ -115,7 +129,7 @@ impl App {
 
     fn send_current_duration(&self) {
         match &self.opt_ticker {
-            None => { }
+            None => {}
             Some((_, tick_dur_send)) => {
                 let dur = Duration::from_millis(self.standard_tick_millis());
                 tick_dur_send.send(dur).unwrap();
@@ -135,7 +149,10 @@ impl App {
             Some(_) => None,
             None => {
                 let (tick_dur_send, tick_dur_recv) = mpsc::channel();
-                Some((mk_ticker_handle(tick_dur_recv, self.tick_send.clone()), tick_dur_send))
+                Some((
+                    mk_ticker_handle(tick_dur_recv, self.tick_send.clone()),
+                    tick_dur_send,
+                ))
             }
         };
         self.opt_ticker = new_opt_ticker;
