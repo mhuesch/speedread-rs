@@ -2,7 +2,7 @@
 mod event;
 
 use crate::event::{Event, Events};
-use std::{cmp, error::Error, io, io::Read, sync::mpsc, thread, time::Duration};
+use std::{cmp, error::Error, io, io::Read, sync::{mpsc, mpsc::{Receiver, Sender}}, thread, time::Duration};
 use structopt::StructOpt;
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::{
@@ -39,13 +39,12 @@ const HELP: &str = r#"
 struct App {
     text: Vec<String>,
     word_idx: usize,
-    /// `None` signifies a paused state. at `Some(0)`, we advance to the next
-    /// word. at `Some(n+1)` we advance to `Some(n)`.
-    ticks_on_current_word: Option<u64>,
+    /// `None` signifies a paused state. `Some` indicates we are reading,
+    /// and the `JoinHandle` refers to our `Tick` thread.
+    opt_ticker: Option<(thread::JoinHandle<()>, Sender<Duration>)>,
     wpm: u64,
-    timer_recv: mpsc::Receiver<TimerEvent>,
-    #[allow(dead_code)]
-    timer_handle: thread::JoinHandle<()>,
+    tick_send: Sender<Tick>,
+    tick_recv: Receiver<Tick>,
 }
 
 enum SpeedChange {
@@ -53,26 +52,34 @@ enum SpeedChange {
     Faster,
 }
 
-enum TimerEvent {
-    Tick,
-}
+struct Tick;
 
-const TICK_DURATION: u64 = 5;
+fn mk_ticker_handle(tick_dur_recv: Receiver<Duration>, tick_send: Sender<Tick>) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        match tick_dur_recv.recv() {
+            Ok(dur) => {
+                thread::sleep(dur);
+                tick_send.send(Tick).unwrap();
+            }
+            Err(_err) => {
+                break;
+            }
+        }
+    })
+}
 
 impl App {
     fn new(init_wpm: u64, text: Vec<String>, resume: usize) -> App {
-        let (timer_send, timer_recv) = mpsc::channel();
-        let timer_handle = thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(TICK_DURATION));
-            timer_send.send(TimerEvent::Tick).expect("send failed");
-        });
+        let (tick_send, tick_recv) = mpsc::channel();
+        let (tick_dur_send, tick_dur_recv) = mpsc::channel();
+        let ticker_handle = mk_ticker_handle(tick_dur_recv, tick_send.clone());
         App {
             text,
             word_idx: resume,
-            ticks_on_current_word: Some(ticks_per_word(init_wpm)),
+            opt_ticker: Some((ticker_handle, tick_dur_send)),
             wpm: init_wpm,
-            timer_recv,
-            timer_handle,
+            tick_send,
+            tick_recv,
         }
     }
 
@@ -106,28 +113,33 @@ impl App {
         self.word_idx = cmp::min(self.word_idx + 1, self.text.len() - 1);
     }
 
-    fn ticks_per_word(&self) -> u64 {
-        ticks_per_word(self.wpm)
+    fn send_current_duration(&self) {
+        match &self.opt_ticker {
+            None => { }
+            Some((_, tick_dur_send)) => {
+                let dur = Duration::from_millis(self.standard_tick_millis());
+                tick_dur_send.send(dur).unwrap();
+            }
+        }
+    }
+
+    fn standard_tick_millis(&self) -> u64 {
+        //  60s  * 1000 ms *  1 min
+        // -----   -------   --------
+        // 1 min     1 s      x words
+        60 * 1000 / self.wpm
     }
 
     fn toggle(&mut self) {
-        let new_ticks = match self.ticks_on_current_word {
+        let new_opt_ticker = match self.opt_ticker {
             Some(_) => None,
-            None => Some(self.ticks_per_word()),
-        };
-        self.ticks_on_current_word = new_ticks;
-    }
-
-    fn tick(&mut self) {
-        let new_ticks = match self.ticks_on_current_word {
-            Some(0) => {
-                self.advance_a_word();
-                Some(self.ticks_per_word())
+            None => {
+                let (tick_dur_send, tick_dur_recv) = mpsc::channel();
+                Some((mk_ticker_handle(tick_dur_recv, self.tick_send.clone()), tick_dur_send))
             }
-            Some(n) => Some(n - 1),
-            None => None,
         };
-        self.ticks_on_current_word = new_ticks;
+        self.opt_ticker = new_opt_ticker;
+        self.send_current_duration();
     }
 
     fn speed_change(&mut self, v: SpeedChange) {
@@ -138,15 +150,8 @@ impl App {
     }
 
     fn paused(&self) -> bool {
-        self.ticks_on_current_word.is_none()
+        self.opt_ticker.is_none()
     }
-}
-
-fn ticks_per_word(wpm: u64) -> u64 {
-    //  60s  * 1000 ms *  1 min   *  1 tick
-    // -----   -------   --------   --------
-    // 1 min     1 s      x words   n millis
-    60 * 1000 / wpm / TICK_DURATION
 }
 
 #[derive(StructOpt, Debug)]
@@ -197,6 +202,7 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
     let events = Events::new();
 
     let mut app = App::new(args.wpm, text, args.resume);
+    app.send_current_duration();
 
     loop {
         terminal.draw(|f| {
@@ -312,13 +318,16 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
             }
         }
 
-        match app.timer_recv.try_recv() {
-            Ok(TimerEvent::Tick) => {
-                app.tick();
+        match app.tick_recv.try_recv() {
+            Ok(Tick) => {
+                if !app.paused() {
+                    app.advance_a_word();
+                    app.send_current_duration();
+                }
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
-                println!("timer channel disconnected");
+                println!("ticker channel disconnected");
                 break;
             }
         }
