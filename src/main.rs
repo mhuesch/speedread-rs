@@ -7,11 +7,7 @@ use std::{
     error::Error,
     io,
     io::Read,
-    sync::{
-        mpsc,
-        mpsc::{Receiver, Sender},
-    },
-    thread,
+    sync::{mpsc, mpsc::Sender},
     time::Duration,
 };
 use structopt::StructOpt;
@@ -50,12 +46,10 @@ const HELP: &str = r#"
 struct App {
     text: Vec<String>,
     word_idx: usize,
-    /// `None` signifies a paused state. `Some` indicates we are reading,
-    /// and the `JoinHandle` refers to our `Tick` thread.
-    opt_ticker: Option<(thread::JoinHandle<()>, Sender<Duration>)>,
+    paused: bool,
     wpm: u64,
-    tick_send: Sender<Tick>,
-    tick_recv: Receiver<Tick>,
+    tick_dur_send: Sender<Duration>,
+    events: Events,
 }
 
 enum SpeedChange {
@@ -63,37 +57,17 @@ enum SpeedChange {
     Faster,
 }
 
-struct Tick;
-
-fn mk_ticker_handle(
-    tick_dur_recv: Receiver<Duration>,
-    tick_send: Sender<Tick>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || loop {
-        match tick_dur_recv.recv() {
-            Ok(dur) => {
-                thread::sleep(dur);
-                tick_send.send(Tick).unwrap();
-            }
-            Err(_err) => {
-                break;
-            }
-        }
-    })
-}
-
 impl App {
     fn new(init_wpm: u64, text: Vec<String>, resume: usize) -> App {
-        let (tick_send, tick_recv) = mpsc::channel();
         let (tick_dur_send, tick_dur_recv) = mpsc::channel();
-        let ticker_handle = mk_ticker_handle(tick_dur_recv, tick_send.clone());
+        let events = Events::new(tick_dur_recv);
         App {
             text,
             word_idx: resume,
-            opt_ticker: Some((ticker_handle, tick_dur_send)),
+            paused: false,
             wpm: init_wpm,
-            tick_send,
-            tick_recv,
+            tick_dur_send,
+            events,
         }
     }
 
@@ -128,27 +102,24 @@ impl App {
     }
 
     fn send_current_duration(&self, is_starting: bool) {
-        match &self.opt_ticker {
-            None => {}
-            Some((_, tick_dur_send)) => {
-                let w = self.current_word();
-                let mut multiplier = 1.;
+        if !self.paused() {
+            let w = self.current_word();
+            let mut multiplier = 1.;
 
-                if w.ends_with(|c| ".!?".contains(c)) {
-                    multiplier *= 2.;
-                } else if w.ends_with(|c| ",:;".contains(c)) {
-                    multiplier *= 1.5;
-                }
-
-                if is_starting {
-                    multiplier *= 5.;
-                }
-
-                let dur = Duration::from_millis(
-                    ((self.standard_tick_millis() as f64) * multiplier).round() as u64,
-                );
-                tick_dur_send.send(dur).unwrap();
+            if w.ends_with(|c| ".!?".contains(c)) {
+                multiplier *= 2.;
+            } else if w.ends_with(|c| ",:;".contains(c)) {
+                multiplier *= 1.5;
             }
+
+            if is_starting {
+                multiplier *= 5.;
+            }
+
+            let dur = Duration::from_millis(
+                ((self.standard_tick_millis() as f64) * multiplier).round() as u64,
+            );
+            self.tick_dur_send.send(dur).unwrap();
         }
     }
 
@@ -160,18 +131,10 @@ impl App {
     }
 
     fn toggle(&mut self) {
-        let new_opt_ticker = match self.opt_ticker {
-            Some(_) => None,
-            None => {
-                let (tick_dur_send, tick_dur_recv) = mpsc::channel();
-                Some((
-                    mk_ticker_handle(tick_dur_recv, self.tick_send.clone()),
-                    tick_dur_send,
-                ))
-            }
-        };
-        self.opt_ticker = new_opt_ticker;
-        self.send_current_duration(true);
+        self.paused = !self.paused;
+        if !self.paused() {
+            self.send_current_duration(true);
+        }
     }
 
     fn speed_change(&mut self, v: SpeedChange) {
@@ -182,7 +145,7 @@ impl App {
     }
 
     fn paused(&self) -> bool {
-        self.opt_ticker.is_none()
+        self.paused
     }
 }
 
@@ -230,8 +193,6 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
     let stdout = AlternateScreen::from(stdout);
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    let events = Events::new();
 
     let mut app = App::new(args.wpm, text, args.resume);
     app.send_current_duration(true);
@@ -327,7 +288,7 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
             f.render_widget(paragraph, chunks[3]);
         })?;
 
-        match events.next() {
+        match app.events.next() {
             Ok(Event::Input(input)) => {
                 if input == Key::Char('q') {
                     break;
@@ -343,23 +304,14 @@ fn go(args: Cli) -> Result<(usize, u64), Box<dyn Error>> {
                     app.advance_a_word();
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                println!("key event channel disconnected");
-                break;
-            }
-        }
-
-        match app.tick_recv.try_recv() {
-            Ok(Tick) => {
+            Ok(Event::Tick) => {
                 if !app.paused() {
                     app.advance_a_word();
                     app.send_current_duration(false);
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                println!("ticker channel disconnected");
+            Err(err) => {
+                println!("app.events: recv error: {}", err);
                 break;
             }
         }
